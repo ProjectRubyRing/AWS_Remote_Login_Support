@@ -83,11 +83,15 @@ endif
 ; ---------------------------------------------------------------------
 ; 入力チェック (必須項目が空でないこと)
 ; ---------------------------------------------------------------------
-if LOGIN_USER = '' then
+; ※ Tera Term マクロの =/<> は整数専用のため、文字列の比較には
+;    strcompare を使う (等しいと result=0 になる)。
+strcompare LOGIN_USER ''
+if result = 0 then
     messagebox 'ログイン ID が指定されていません。処理を中止します。' 'EC2 自動ログイン - エラー'
     end
 endif
-if HOST_ADDR = '' then
+strcompare HOST_ADDR ''
+if result = 0 then
     messagebox '接続先 IP アドレスが指定されていません。処理を中止します。' 'EC2 自動ログイン - エラー'
     end
 endif
