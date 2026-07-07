@@ -1,0 +1,135 @@
+; =====================================================================
+;  ec2_auto_login.ttl
+;    EC2 (RHEL9) 環境へ SSH 接続し自動ログインする Tera Term マクロ。
+;
+;  動作確認対象:
+;    - Tera Term 5 (ver 5.5.2 x64) / Windows 11
+;
+;  特徴:
+;    - ログイン ID・パスワード・IP アドレスをパラメータで指定でき、
+;      特定のホストに依存しない汎用マクロとして使えます。
+;    - パラメータを省略した場合は、実行時にダイアログで入力を促します。
+;
+;  実行方法 (コマンドプロンプト / ショートカット / タスク等から):
+;    "C:\Program Files\teraterm5\ttpmacro.exe" ec2_auto_login.ttl <user> <password> <ip> [port]
+;
+;    例:
+;    "C:\Program Files\teraterm5\ttpmacro.exe" ec2_auto_login.ttl ec2-user MyP@ssw0rd 10.0.0.15
+;    "C:\Program Files\teraterm5\ttpmacro.exe" ec2_auto_login.ttl ec2-user MyP@ssw0rd 10.0.0.15 22
+;
+;    ※ .ttl を ttpmacro.exe に関連付けておけば、ダブルクリックでも起動できます
+;      (その場合はパラメータ省略となり、ダイアログ入力になります)。
+;
+;  パラメータ (Tera Term マクロのシステム変数):
+;    param2 = ログイン ID
+;    param3 = パスワード
+;    param4 = 接続先 IP アドレス (またはホスト名)
+;    param5 = SSH ポート番号 (省略時は 22)
+;    ※ param1 はマクロファイル名、paramcnt はマクロ名を含むパラメータ数。
+;
+;  注意事項:
+;    - 初回接続時、未知のホスト鍵に対して確認ダイアログが表示される場合が
+;      あります。事前に一度手動で接続して known_hosts に登録しておくと、
+;      以降は本マクロで完全自動ログインできます。
+;    - パスワードに空白文字を含む場合、コマンドライン渡しではうまく解釈
+;      されないことがあります。その場合はパラメータを省略してダイアログ
+;      入力を利用してください。
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; パラメータの取得。省略された場合はダイアログで入力を促す。
+; ---------------------------------------------------------------------
+
+; --- ログイン ID ---
+if paramcnt >= 2 then
+    LOGIN_USER = param2
+else
+    inputbox 'ログイン ID を入力してください' 'EC2 自動ログイン - ユーザ'
+    if result <> 1 then
+        end
+    endif
+    LOGIN_USER = inputstr
+endif
+
+; --- パスワード ---
+if paramcnt >= 3 then
+    LOGIN_PASS = param3
+else
+    passwordbox 'パスワードを入力してください' 'EC2 自動ログイン - パスワード'
+    if result <> 1 then
+        end
+    endif
+    LOGIN_PASS = inputstr
+endif
+
+; --- 接続先 IP アドレス / ホスト名 ---
+if paramcnt >= 4 then
+    HOST_ADDR = param4
+else
+    inputbox '接続先 IP アドレス (またはホスト名) を入力してください' 'EC2 自動ログイン - ホスト'
+    if result <> 1 then
+        end
+    endif
+    HOST_ADDR = inputstr
+endif
+
+; --- SSH ポート番号 (省略時は 22) ---
+if paramcnt >= 5 then
+    SSH_PORT = param5
+else
+    SSH_PORT = '22'
+endif
+
+; ---------------------------------------------------------------------
+; 入力チェック (必須項目が空でないこと)
+; ---------------------------------------------------------------------
+if LOGIN_USER = '' then
+    messagebox 'ログイン ID が指定されていません。処理を中止します。' 'EC2 自動ログイン - エラー'
+    end
+endif
+if HOST_ADDR = '' then
+    messagebox '接続先 IP アドレスが指定されていません。処理を中止します。' 'EC2 自動ログイン - エラー'
+    end
+endif
+
+; ---------------------------------------------------------------------
+; SSH2 / パスワード認証で接続するためのコマンドラインを組み立てる。
+;   <host>:<port> /ssh /2 /auth=password /user=<user> /passwd=<password>
+; ---------------------------------------------------------------------
+COMMAND = HOST_ADDR
+strconcat COMMAND ':'
+strconcat COMMAND SSH_PORT
+strconcat COMMAND ' /ssh /2 /auth=password /user='
+strconcat COMMAND LOGIN_USER
+strconcat COMMAND ' /passwd='
+strconcat COMMAND LOGIN_PASS
+
+; ---------------------------------------------------------------------
+; 接続実行
+; ---------------------------------------------------------------------
+connect COMMAND
+
+; connect 直後は接続確立に時間がかかる場合があるため、
+; シェルプロンプトが表示されるまで待機して結果を確認する。
+;   RHEL9 の既定プロンプト:
+;     一般ユーザ ... 末尾が '$'
+;     root       ... 末尾が '#'
+; 認証失敗やタイムアウトも検知する。
+timeout = 30
+wait '$ ' '# ' '$' '#' 'assword' 'denied' 'refused' 'closed'
+
+if result = 0 then
+    ; timeout : プロンプトを検知できなかった
+    messagebox '接続がタイムアウトしました。IP アドレス・ポート・ネットワーク到達性を確認してください。' 'EC2 自動ログイン - エラー'
+    end
+endif
+
+if result >= 5 then
+    ; 'assword' / 'denied' / 'refused' / 'closed' を検知
+    messagebox '認証に失敗、または接続が拒否されました。ログイン ID とパスワードを確認してください。' 'EC2 自動ログイン - エラー'
+    end
+endif
+
+; ここまで来ればシェルプロンプトを検知できている = ログイン成功。
+; マクロ終了後もそのまま端末操作を続けられるよう、接続は維持したまま終了する。
+end
