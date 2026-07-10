@@ -36,12 +36,72 @@
 #          クリップボードに直接コピーされる。ヘッドレス環境ではこれが本命。
 #        ※ tmux 内で使う場合は `set -g set-clipboard on` が必要。
 #
+#   ★ TeraTerm のリモートクリップボード (OSC52) で「貼り付けが途中で切れる」場合:
+#       TeraTerm はリモートから受信する OSC 制御文字列を teraterm.ini の
+#       MaxOSCBufferSize (既定 4096 バイト) までしかバッファリングせず、
+#       それを超えた分は破棄する。terraform plan 出力のような長い文字列は
+#       base64 化すると容易に 4096 バイトを超えるため、貼り付けが途中で
+#       切れてしまう。
+#       → 対策: TeraTerm の teraterm.ini で MaxOSCBufferSize を十分大きな値
+#         (例: MaxOSCBufferSize=1000000) に設定して TeraTerm を再起動する。
+#         設定箇所は [設定]-[その他の設定]-... または teraterm.ini の直接編集。
+#       本スクリプトは送信する OSC52 データ長を計算し、上限を超えそうな場合に
+#       警告と推奨バッファサイズを表示する。想定するバッファ上限は環境変数
+#       OSC52_BUFFER_LIMIT で上書きできる (既定 4096 = TeraTerm の既定値)。
+#
 set -u
+
+# TeraTerm 等の OSC バッファ上限 (バイト)。これを超える OSC52 データは
+# 受信側で切り詰められる可能性があるため、事前に警告する。
+# TeraTerm 側で MaxOSCBufferSize を引き上げている場合は、この変数にも
+# 同じ値を設定しておくと不要な警告を抑制できる。
+OSC52_BUFFER_LIMIT="${OSC52_BUFFER_LIMIT:-4096}"
 
 # ---------------------------------------------------------------
 # クリップボードコピー (xclip / wl-copy / OSC52 の順にフォールバック)
 #   ※ aws_login_check.sh と同一の仕組み。
 # ---------------------------------------------------------------
+# OSC52 で端末のクリップボードへ書き込む。
+#   base64 は改行を除去して 1 本のシーケンスとして送る (改行が混ざると
+#   受信側で途切れる原因になる)。
+#   送信データ長が OSC52_BUFFER_LIMIT を超える場合は、受信側 (TeraTerm 等)
+#   で切り詰められる恐れがあるため、必要なバッファサイズを添えて警告する。
+osc52_copy() {
+    local text="$1"
+    local b64 osc_len
+
+    b64=$(printf '%s' "$text" | base64 | tr -d '\n')
+
+    # 受信側 OSC バッファが保持する制御文字列長 = "52;c;" (5) + base64 長。
+    osc_len=$(( ${#b64} + 5 ))
+
+    if [ "$osc_len" -gt "$OSC52_BUFFER_LIMIT" ]; then
+        # 少し余裕を持たせた推奨値 (1.5 倍を 1024 単位に切り上げ)。
+        local recommend
+        recommend=$(( (osc_len * 3 / 2 + 1023) / 1024 * 1024 ))
+        {
+            echo ""
+            echo ">>> [警告] クリップボードへ送るデータ長 ${osc_len} バイトが"
+            echo ">>>        OSC バッファ上限の想定値 ${OSC52_BUFFER_LIMIT} バイトを超えています。"
+            echo ">>>        TeraTerm では teraterm.ini の MaxOSCBufferSize (既定 4096) を"
+            echo ">>>        超えた分が破棄され、貼り付けが途中で切れます。"
+            echo ">>>        → teraterm.ini に MaxOSCBufferSize=${recommend} 以上を設定し、"
+            echo ">>>          TeraTerm を再起動してから再実行してください。"
+            echo ">>>        (バッファを引き上げ済みなら OSC52_BUFFER_LIMIT=${recommend} を"
+            echo ">>>         指定するとこの警告を抑制できます。)"
+            echo ""
+        } >&2
+    fi
+
+    if [ -n "${TMUX:-}" ]; then
+        # tmux パススルー形式
+        printf '\033Ptmux;\033\033]52;c;%s\a\033\\' "$b64" > /dev/tty
+    else
+        printf '\033]52;c;%s\a' "$b64" > /dev/tty
+    fi
+    return 0
+}
+
 copy_to_clipboard() {
     local text="$1"
 
@@ -57,14 +117,7 @@ copy_to_clipboard() {
 
     # OSC52: SSH 接続元端末のクリップボードへコピー
     if [ -e /dev/tty ]; then
-        local b64
-        b64=$(printf '%s' "$text" | base64 | tr -d '\n')
-        if [ -n "${TMUX:-}" ]; then
-            # tmux パススルー形式
-            printf '\033Ptmux;\033\033]52;c;%s\a\033\\' "$b64" > /dev/tty
-        else
-            printf '\033]52;c;%s\a' "$b64" > /dev/tty
-        fi
+        osc52_copy "$text"
         return 0
     fi
 
