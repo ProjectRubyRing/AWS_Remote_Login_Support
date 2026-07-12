@@ -9,6 +9,10 @@
 ;    - ログイン ID・パスワード・IP アドレスをパラメータで指定でき、
 ;      特定のホストに依存しない汎用マクロとして使えます。
 ;    - パラメータを省略した場合は、実行時にダイアログで入力を促します。
+;    - この .ttl と同じフォルダに「同名の .ini」を自動用意し、その ini で
+;      Tera Term を起動します (terraform plan のクリップボード貼り付けに
+;      必要なバッファ拡張や、画面デザインを反映するため)。詳細は下記
+;      【設定】セクションを参照してください。
 ;
 ;  実行方法 (コマンドプロンプト / ショートカット / タスク等から):
 ;    "C:\Program Files\teraterm5\ttpmacro.exe" ec2_auto_login.ttl <user> <password> <ip> [port]
@@ -34,6 +38,47 @@
 ;    - パスワードに空白文字を含む場合、コマンドライン渡しではうまく解釈
 ;      されないことがあります。その場合はパラメータを省略してダイアログ
 ;      入力を利用してください。
+; =====================================================================
+
+; =====================================================================
+;  【設定】このマクロが起動する Tera Term 用 ini の自動生成・自動適用
+; ---------------------------------------------------------------------
+;  この .ttl と同じフォルダに、.ttl と同じ名前の .ini
+;  (例: ec2_auto_login.ttl -> ec2_auto_login.ini) を用意し、その ini で
+;  Tera Term を起動します。
+;    - 同名 ini が既にあれば、それをそのまま読み込んで使います
+;      (手動編集した内容を尊重します)。
+;    - 無ければ、既定の TERATERM.INI をベースに、下記 CFG_* の値を反映した
+;      ini を同名で自動生成し、それを使います。
+;  設定を変えたいときは、下記 CFG_* の値を書き換えてください。生成済みの
+;  同名 ini がある場合は、その ini を一度削除すると次回起動時に再生成されます。
+; ---------------------------------------------------------------------
+
+; --- ベースにする既定の TERATERM.INI のパス --------------------------
+;   1つ目が見つからなければ 2つ目を探します。環境に合わせて変更可。
+DEFAULT_INI_1 = 'C:\Program Files (x86)\teraterm5\TERATERM.INI'
+DEFAULT_INI_2 = 'C:\Program Files\teraterm5\TERATERM.INI'
+
+; --- (A) terraform_plan_clipboard.sh 用: クリップボードのデータサイズ拡張 ---
+;   terraform plan の出力を OSC52 でクリップボードへ送る際、受信バッファが
+;   小さいと貼り付けが途中で切れます。十分大きな値にしておきます。
+;   ※ terraform_plan_clipboard.sh 側でも環境変数 OSC52_BUFFER_LIMIT に
+;      同じ値を設定すると、不要な警告表示を抑制できます。
+CFG_MaxOSCBufferSize          = '1000000'   ; OSC バッファ上限 (バイト)
+;   リモート(SSH先)からのクリップボード書き込みを許可 (off/write/read/on)
+CFG_ClipboardAccessFromRemote = 'write'
+;   コピーのたびに出る確認ダイアログを抑制 (on/off)
+CFG_NotifyClipboardAccess     = 'off'
+
+; --- (B) Tera Term 画面のデザイン ------------------------------------
+CFG_TerminalSize     = '140,40'                ; 端末サイズ  列,行
+CFG_EnableScrollBuff = 'on'                     ; スクロールバッファを使う
+CFG_ScrollBuffSize   = '100000'                 ; スクロール行数
+CFG_VTColor          = '220,220,220,24,24,24'   ; 文字色 R,G,B, 背景色 R,G,B
+; フォントも変更したい場合は APPLY_FONT を 1 にしてください。日本語表示が
+; 必要なら日本語対応フォント (例 'BIZ UDGothic,0,-19,128') を指定します。
+APPLY_FONT           = 0
+CFG_VTFont           = 'Consolas,0,-19,0'       ; フォント名,スタイル,サイズ,文字セット
 ; =====================================================================
 
 ; ---------------------------------------------------------------------
@@ -97,8 +142,39 @@ if result = 0 then
 endif
 
 ; ---------------------------------------------------------------------
+; この .ttl と同じフォルダの「同名 .ini」を用意する。
+;   INI_PATH = <.ttl のフォルダ>\<.ttl と同じ基底名>.ini
+;   例) ec2_auto_login.ttl -> ec2_auto_login.ini
+; 既にあればそのまま利用、無ければ既定 ini から生成して利用する。
+; ---------------------------------------------------------------------
+; マクロのあるフォルダ (getdir) と、マクロのファイル名 (param1) から
+; 同名 .ini のフルパスを組み立てる。
+getdir MACRO_DIR
+basename INI_NAME param1
+; 拡張子 (.ttl 等) を .ini へ置き換える。拡張子が無ければ .ini を付与する。
+strreplace INI_NAME 1 '\.[^.]+$' '.ini'
+if result <> 1 then
+    strconcat INI_NAME '.ini'
+endif
+makepath INI_PATH MACRO_DIR INI_NAME
+
+; 同名 ini が無ければ、既定 TERATERM.INI をベースに生成する。
+filesearch INI_PATH
+if result = 0 then
+    call generate_ini
+endif
+
+; 最終的に使える ini があるか確認し、あれば起動時に /F= で読み込む。
+USE_INI = 0
+filesearch INI_PATH
+if result = 1 then
+    USE_INI = 1
+endif
+
+; ---------------------------------------------------------------------
 ; SSH2 / パスワード認証で接続するためのコマンドラインを組み立てる。
 ;   <host>:<port> /ssh /2 /auth=password /user=<user> /passwd=<password>
+;   さらに、上で用意した同名 ini を設定ファイルとして /F= で指定する。
 ; ---------------------------------------------------------------------
 COMMAND = HOST_ADDR
 strconcat COMMAND ':'
@@ -107,6 +183,13 @@ strconcat COMMAND ' /ssh /2 /auth=password /user='
 strconcat COMMAND LOGIN_USER
 strconcat COMMAND ' /passwd='
 strconcat COMMAND LOGIN_PASS
+
+; 用意した同名 ini を設定ファイルとして使う (/F=...)。
+if USE_INI = 1 then
+    strconcat COMMAND ' /F="'
+    strconcat COMMAND INI_PATH
+    strconcat COMMAND '"'
+endif
 
 ; ---------------------------------------------------------------------
 ; 接続実行
@@ -137,3 +220,111 @@ endif
 ; ここまで来ればシェルプロンプトを検知できている = ログイン成功。
 ; マクロ終了後もそのまま端末操作を続けられるよう、接続は維持したまま終了する。
 end
+
+; =====================================================================
+;  サブルーチン (call でのみ実行される。end より後ろに置く)
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; generate_ini:
+;   既定の TERATERM.INI (DEFAULT_INI_1 -> DEFAULT_INI_2 の順に探索) を
+;   1 行ずつ読み、INI_PATH へ書き出す。[Tera Term] セクション見出しの
+;   直後に、上で設定した CFG_* の上書き値を挿入する。
+;   Windows の ini 読み出し (GetPrivateProfileString) は同一セクション内で
+;   「最初に現れたキー」を採用するため、見出し直後に置いた上書き値が
+;   ベース ini の既定値より優先される。
+; ---------------------------------------------------------------------
+:generate_ini
+    ; --- ベースにする既定 ini を探す ---
+    SRC_INI = DEFAULT_INI_1
+    filesearch SRC_INI
+    if result = 0 then
+        SRC_INI = DEFAULT_INI_2
+        filesearch SRC_INI
+        if result = 0 then
+            messagebox '既定の TERATERM.INI が見つかりませんでした。ini を生成せず、既定設定のまま接続します。DEFAULT_INI_1 / DEFAULT_INI_2 のパスを確認してください。' 'ini 自動生成 - 警告'
+            return
+        endif
+    endif
+
+    ; --- 読み込み元 (読み取り専用) と書き出し先を開く ---
+    fileopen SRCH SRC_INI 0 1
+    if SRCH < 0 then
+        messagebox '既定 TERATERM.INI を開けませんでした。ini を生成せず接続します。' 'ini 自動生成 - 警告'
+        return
+    endif
+    fileopen DSTH INI_PATH 0
+    if DSTH < 0 then
+        fileclose SRCH
+        messagebox '同名 ini を作成できませんでした。ini を生成せず接続します。' 'ini 自動生成 - 警告'
+        return
+    endif
+
+    ; --- 1 行ずつコピーしつつ、[Tera Term] 見出しの直後に上書き値を挿入 ---
+    INSERTED = 0
+    while 1
+        filereadln SRCH LINE
+        if result = 1 then
+            break
+        endif
+        filewriteln DSTH LINE
+        if INSERTED = 0 then
+            strscan LINE '[Tera Term]'
+            if result = 1 then
+                call emit_overrides
+                INSERTED = 1
+            endif
+        endif
+    endwhile
+
+    ; --- 万一 [Tera Term] 見出しが無ければ、末尾に追記して上書き値を書く ---
+    if INSERTED = 0 then
+        filewriteln DSTH ''
+        filewriteln DSTH '[Tera Term]'
+        call emit_overrides
+    endif
+
+    fileclose SRCH
+    fileclose DSTH
+    return
+
+; ---------------------------------------------------------------------
+; emit_overrides:
+;   CFG_* の値を "キー=値" 形式で DSTH へ書き出す。生成される ini を
+;   Shift-JIS 環境でも安全に保つため、ここで書き出す行は ASCII のみとする。
+; ---------------------------------------------------------------------
+:emit_overrides
+    filewriteln DSTH '; ==== auto-generated overrides by ec2_auto_login.ttl (edit the .ttl CFG_* to change) ===='
+
+    ; (A) terraform_plan_clipboard.sh 用: クリップボードのデータサイズ拡張
+    LINEBUF = 'MaxOSCBufferSize='
+    strconcat LINEBUF CFG_MaxOSCBufferSize
+    filewriteln DSTH LINEBUF
+    LINEBUF = 'ClipboardAccessFromRemote='
+    strconcat LINEBUF CFG_ClipboardAccessFromRemote
+    filewriteln DSTH LINEBUF
+    LINEBUF = 'NotifyClipboardAccess='
+    strconcat LINEBUF CFG_NotifyClipboardAccess
+    filewriteln DSTH LINEBUF
+
+    ; (B) 画面デザイン
+    LINEBUF = 'TerminalSize='
+    strconcat LINEBUF CFG_TerminalSize
+    filewriteln DSTH LINEBUF
+    LINEBUF = 'EnableScrollBuff='
+    strconcat LINEBUF CFG_EnableScrollBuff
+    filewriteln DSTH LINEBUF
+    LINEBUF = 'ScrollBuffSize='
+    strconcat LINEBUF CFG_ScrollBuffSize
+    filewriteln DSTH LINEBUF
+    LINEBUF = 'VTColor='
+    strconcat LINEBUF CFG_VTColor
+    filewriteln DSTH LINEBUF
+    if APPLY_FONT = 1 then
+        LINEBUF = 'VTFont='
+        strconcat LINEBUF CFG_VTFont
+        filewriteln DSTH LINEBUF
+    endif
+
+    filewriteln DSTH '; ==== end of auto-generated overrides ===='
+    return
