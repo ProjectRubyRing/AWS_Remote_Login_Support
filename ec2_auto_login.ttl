@@ -1,4 +1,4 @@
-; =====================================================================
+﻿; =====================================================================
 ;  ec2_auto_login.ttl
 ;    EC2 (RHEL9) 環境へ SSH 接続し自動ログインする Tera Term マクロ。
 ;
@@ -11,8 +11,10 @@
 ;    - パラメータを省略した場合は、実行時にダイアログで入力を促します。
 ;    - この .ttl と同じフォルダに「同名の .ini」を自動用意し、その ini で
 ;      Tera Term を起動します (terraform plan のクリップボード貼り付けに
-;      必要なバッファ拡張や、画面デザインを反映するため)。詳細は下記
-;      【設定】セクションを参照してください。
+;      必要なバッファ拡張、aws_login_file.sh の ZMODEM 自動ダウンロード、
+;      画面デザインを反映するため)。詳細は下記【設定】セクションを
+;      参照してください。
+;    - ZMODEM の受信先フォルダ (CFG_FileDir) が無ければ自動作成します。
 ;
 ;  実行方法 (コマンドプロンプト / ショートカット / タスク等から):
 ;    "C:\Program Files\teraterm5\ttpmacro.exe" ec2_auto_login.ttl <user> <password> <ip> [port]
@@ -52,6 +54,8 @@
 ;      ini を同名で自動生成し、それを使います。
 ;  設定を変えたいときは、下記 CFG_* の値を書き換えてください。生成済みの
 ;  同名 ini がある場合は、その ini を一度削除すると次回起動時に再生成されます。
+;  (以前の版で生成した ini には ZMODEM 関連の設定が入っていないため、
+;   自動ダウンロードを使う場合は一度削除して再生成してください。)
 ; ---------------------------------------------------------------------
 
 ; --- ベースにする既定の TERATERM.INI のパス --------------------------
@@ -70,7 +74,19 @@ CFG_ClipboardAccessFromRemote = 'write'
 ;   コピーのたびに出る確認ダイアログを抑制 (on/off)
 CFG_NotifyClipboardAccess     = 'off'
 
-; --- (B) Tera Term 画面のデザイン ------------------------------------
+; --- (B) aws_login_file.sh 用: ZMODEM 自動ダウンロード ----------------
+;   aws_login_file.sh は OAuth URL をファイルへ出力し、ZMODEM (sz) で
+;   この端末へ送ってきます。自動で受信して指定フォルダへ保存するために、
+;   ZMODEM の自動受信を有効にし、ファイル転送のフォルダを指定します。
+;   ※ この 2 つは Tera Term の設定ダイアログには項目が無く、ini でのみ
+;     設定できます (だからこのマクロで ini を生成しています)。
+CFG_ZmodemAuto      = 'on'                ; ホスト側 sz を検知して自動受信 (on/off)
+CFG_FileDir         = 'C:\aws_login_url'  ; 受信ファイルの保存先 = ダウンロード先
+CFG_AutoFileRename  = 'on'                ; 同名ファイルがあれば自動リネーム
+;   保存先フォルダが無ければマクロが作成します。作成をやめたい場合は 0 に。
+CREATE_FILEDIR      = 1
+
+; --- (C) Tera Term 画面のデザイン ------------------------------------
 CFG_TerminalSize     = '140,40'                ; 端末サイズ  列,行
 CFG_EnableScrollBuff = 'on'                     ; スクロールバッファを使う
 CFG_ScrollBuffSize   = '100000'                 ; スクロール行数
@@ -162,6 +178,17 @@ makepath INI_PATH MACRO_DIR INI_NAME
 filesearch INI_PATH
 if result = 0 then
     call generate_ini
+endif
+
+; ZMODEM の受信先フォルダ (CFG_FileDir) を用意しておく。
+; 既に存在する場合は foldercreate が失敗するだけなので結果は見ない。
+; ※ foldercreate は途中のフォルダをまとめて作成しないため、
+;   深い階層を指定する場合は親フォルダを先に用意してください。
+if CREATE_FILEDIR = 1 then
+    strcompare CFG_FileDir ''
+    if result <> 0 then
+        foldercreate CFG_FileDir
+    endif
 endif
 
 ; 最終的に使える ini があるか確認し、あれば起動時に /F= で読み込む。
@@ -307,7 +334,23 @@ end
     strconcat LINEBUF CFG_NotifyClipboardAccess
     filewriteln DSTH LINEBUF
 
-    ; (B) 画面デザイン
+    ; (B) aws_login_file.sh 用: ZMODEM 自動ダウンロード
+    LINEBUF = 'ZmodemAuto='
+    strconcat LINEBUF CFG_ZmodemAuto
+    filewriteln DSTH LINEBUF
+    LINEBUF = 'AutoFileRename='
+    strconcat LINEBUF CFG_AutoFileRename
+    filewriteln DSTH LINEBUF
+    ; FileDir は空だと Tera Term の既定 (カレント) になるため、
+    ; 指定がある場合だけ書き出す。
+    strcompare CFG_FileDir ''
+    if result <> 0 then
+        LINEBUF = 'FileDir='
+        strconcat LINEBUF CFG_FileDir
+        filewriteln DSTH LINEBUF
+    endif
+
+    ; (C) 画面デザイン
     LINEBUF = 'TerminalSize='
     strconcat LINEBUF CFG_TerminalSize
     filewriteln DSTH LINEBUF

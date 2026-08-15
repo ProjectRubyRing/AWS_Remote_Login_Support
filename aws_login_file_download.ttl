@@ -1,0 +1,269 @@
+﻿; =====================================================================
+;  aws_login_file_download.ttl
+;    接続済みの Tera Term セッション上で aws_login_file.sh を実行し、
+;    EC2 側に出力された「OAuth URL ファイル」を接続元端末の指定フォルダへ
+;    自動ダウンロードする Tera Term マクロ。
+;
+;  動作確認対象:
+;    - Tera Term 5 (ver 5.5.2 x64) / Windows 11
+;
+;  aws_login_file.sh 単体との違い:
+;    - スクリプト単体は ZMODEM (sz) で転送するため、保存先は Tera Term の
+;      FileDir 設定に従う (EC2 側からフォルダを指定できない)。
+;    - 本マクロは SCP (scprecv) でダウンロードするため、保存先フォルダを
+;      下記 CFG_LOCAL_SAVE_DIR で自由に指定できる。EC2 側に lrzsz (sz) が
+;      入っていなくても動作する。
+;
+;  処理の流れ:
+;    1. 接続状態を確認する
+;    2. 接続元端末側の保存先フォルダを作成する (無ければ)
+;    3. リモートで aws_login_file.sh を実行する (DOWNLOAD=macro で起動)
+;    4. スクリプトが出力する目印行から URL ファイルのパスを取得する
+;         [AWS_LOGIN_FILE] PATH=/home/ec2-user/aws_login_url/xxxx.txt
+;    5. scprecv で保存先フォルダへダウンロードする
+;       (.url ショートカットも同じ名前で取得する)
+;    6. (任意) 既定のブラウザで URL を開く
+;    7. (任意) トークン入力ダイアログを表示し、入力値をリモートへ送る
+;    8. スクリプトの最終結果 ([AWS_LOGIN_FILE] DONE=...) を待って結果表示
+;
+;  実行方法:
+;    - Tera Term で EC2 に SSH2 接続した状態で
+;      [コントロール] - [マクロ] から本ファイルを選ぶ
+;    - または: "C:\Program Files\teraterm5\ttpmacro.exe" aws_login_file_download.ttl
+;      (この場合も、対象の Tera Term が接続済みである必要があります)
+;
+;  注意事項:
+;    - scprecv は SSH2 接続でのみ利用できます (シリアル接続等では使えません)。
+;    - CFG_LOCAL_SAVE_DIR は親フォルダが存在している必要があります
+;      (foldercreate は途中のフォルダをまとめて作成しません)。
+;    - 取得した URL には一度きりの認証情報が含まれます。認証後は
+;      ダウンロードしたファイルを削除してください。
+; =====================================================================
+
+; =====================================================================
+;  【設定】環境に合わせて書き換えてください
+; ---------------------------------------------------------------------
+
+; --- 接続元端末 (Windows) 側の保存先フォルダ -------------------------
+;   ここで指定したフォルダ配下に URL ファイルをダウンロードします。
+CFG_LOCAL_SAVE_DIR   = 'C:\aws_login_url'
+
+; --- EC2 (リモート) 側の設定 -----------------------------------------
+;   スクリプトの配置パスと、URL ファイルの出力先ディレクトリ。
+;   リモートのシェルが展開するため $HOME を使えます。
+CFG_REMOTE_SCRIPT    = '$HOME/aws_login_file.sh'
+CFG_REMOTE_OUT_DIR   = '$HOME/aws_login_url'
+
+; --- 動作オプション --------------------------------------------------
+;   1 = 有効 / 0 = 無効
+;   ※ CFG_GET_SHORTCUT は、スクリプトを URL_SHORTCUT=0 で使う場合は 0 に
+;     してください (存在しないファイルを SCP で取りに行かなくなります)。
+CFG_GET_SHORTCUT     = 1    ; .url (インターネットショートカット) も取得する
+CFG_OPEN_BROWSER     = 0    ; ダウンロード後、既定のブラウザで URL を自動で開く
+CFG_TOKEN_PROMPT     = 1    ; トークン入力ダイアログを表示してリモートへ送る
+CFG_SHOW_RESULT      = 1    ; 最後に結果をダイアログ表示する
+
+; --- タイムアウト (秒) -----------------------------------------------
+;   ※ トークン入力ダイアログにはタイムアウトがありません (閉じるまで待ちます)。
+CFG_WAIT_URL         = 120  ; URL ファイルが出力されるまでの待ち時間
+CFG_WAIT_LOGIN       = 300  ; 認証完了までの待ち時間
+CFG_WAIT_FILE        = 60   ; ダウンロード完了 (ファイル出現) までの待ち時間
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; 1. 接続状態の確認
+;    testlink: 0=リンク無し / 1=未接続 / 2=接続中
+; ---------------------------------------------------------------------
+testlink
+if result <> 2 then
+    messagebox 'Tera Term が接続されていません。EC2 へ SSH2 接続した状態で実行してください。' 'AWS ログイン - エラー'
+    end
+endif
+
+; ---------------------------------------------------------------------
+; 2. 保存先フォルダの用意
+;    foldercreate は成功で result=0。既に存在する場合は失敗するため、
+;    ここでは結果を判定せず、後段のダウンロード結果で成否を確認する。
+; ---------------------------------------------------------------------
+foldercreate CFG_LOCAL_SAVE_DIR
+
+; ---------------------------------------------------------------------
+; 3. リモートで aws_login_file.sh を実行する
+;    DOWNLOAD=macro … ZMODEM 転送は行わせず、本マクロが SCP で取得する
+; ---------------------------------------------------------------------
+COMMAND = 'DOWNLOAD=macro URL_OUT_DIR='
+strconcat COMMAND CFG_REMOTE_OUT_DIR
+strconcat COMMAND ' bash '
+strconcat COMMAND CFG_REMOTE_SCRIPT
+
+sendln COMMAND
+
+; ---------------------------------------------------------------------
+; 4. URL ファイルのパスを取得する
+;    スクリプトが出力する次の目印行を待つ。
+;      [AWS_LOGIN_FILE] PATH=<絶対パス>
+;    途中で失敗した場合は DONE=ng を出力する。
+;    ※ 目印行は連続して流れてくるため、複数の行を順番に待ち受けると
+;      取りこぼすおそれがある。待つのはこの 1 行だけにして、
+;      ファイル名などはマクロ側で組み立てる。
+; ---------------------------------------------------------------------
+timeout = CFG_WAIT_URL
+waitregex '\[AWS_LOGIN_FILE\] PATH=([^ \t\r\n]+)' '\[AWS_LOGIN_FILE\] DONE='
+
+if result = 0 then
+    messagebox 'OAuth URL ファイルの出力を検出できませんでした (タイムアウト)。画面の出力内容を確認してください。' 'AWS ログイン - エラー'
+    end
+endif
+if result = 2 then
+    messagebox 'スクリプトが URL を取得できずに終了しました。画面の出力内容を確認してください。' 'AWS ログイン - エラー'
+    end
+endif
+
+REMOTE_FILE = groupmatchstr1
+
+; リモートのパス (POSIX 形式) からファイル名を取り出し、保存先のフルパスにする
+basename LOCAL_NAME REMOTE_FILE
+makepath LOCAL_FILE CFG_LOCAL_SAVE_DIR LOCAL_NAME
+
+; ---------------------------------------------------------------------
+; 5. SCP でダウンロードする
+;    scprecv は転送完了を待たずに戻るため、ファイルが現れるまで待機する。
+; ---------------------------------------------------------------------
+scprecv REMOTE_FILE LOCAL_FILE
+
+WAIT_TARGET = LOCAL_FILE
+WAIT_SECONDS = CFG_WAIT_FILE
+call wait_local_file
+if FOUND = 0 then
+    MSG = 'ダウンロードに失敗しました。保存先を確認してください: '
+    strconcat MSG LOCAL_FILE
+    messagebox MSG 'AWS ログイン - エラー'
+    end
+endif
+
+; --- 5-2. インターネットショートカット (.url) も取得する -------------
+;   ダブルクリックするだけで既定のブラウザが開ける補助ファイル。
+;   スクリプトは URL ファイルと同じ名前で拡張子だけ .url にして出力するため、
+;   パスはここで組み立てる (URL_SHORTCUT=0 で実行された場合は取得に失敗する
+;   だけなので、その場合は無視して先へ進む)。
+LOCAL_SHORTCUT = ''
+if CFG_GET_SHORTCUT = 1 then
+    REMOTE_SHORTCUT = REMOTE_FILE
+    strreplace REMOTE_SHORTCUT 1 '\.txt$' '.url'
+    if result = 1 then
+        SHORTCUT_NAME = LOCAL_NAME
+        strreplace SHORTCUT_NAME 1 '\.txt$' '.url'
+        makepath LOCAL_SHORTCUT CFG_LOCAL_SAVE_DIR SHORTCUT_NAME
+        scprecv REMOTE_SHORTCUT LOCAL_SHORTCUT
+        WAIT_TARGET = LOCAL_SHORTCUT
+        ; 補助ファイルなので、無ければ短時間で諦める
+        WAIT_SECONDS = 5
+        call wait_local_file
+        if FOUND = 0 then
+            LOCAL_SHORTCUT = ''
+        endif
+    else
+        LOCAL_SHORTCUT = ''
+    endif
+endif
+
+; ---------------------------------------------------------------------
+; 6. ダウンロードした URL を読み出す
+;    ファイルの 1 行目が OAuth URL (スクリプトは URL のみを書き出す)。
+; ---------------------------------------------------------------------
+OAUTH_URL = ''
+fileopen FH LOCAL_FILE 0 1
+if FH >= 0 then
+    filereadln FH OAUTH_URL
+    fileclose FH
+endif
+
+; --- 任意: 既定のブラウザで開く --------------------------------------
+;   rundll32 経由で開くとコンソール窓が出ず、URL 内の & もそのまま渡せる。
+if CFG_OPEN_BROWSER = 1 then
+    strcompare OAUTH_URL ''
+    if result <> 0 then
+        BROWSER_CMD = 'rundll32.exe url.dll,FileProtocolHandler '
+        strconcat BROWSER_CMD OAUTH_URL
+        exec BROWSER_CMD
+    endif
+endif
+
+; ---------------------------------------------------------------------
+; 7. トークンの入力と受け渡し
+;    ダイアログに入力されたトークンをそのままリモートへ送る。
+;    ※ スクリプトはこの時点で既に入力待ち、または間もなく入力待ちになる。
+;      早く送っても端末の入力バッファに残るため取りこぼしはない。
+;      (TOKEN_WAIT の目印を待つ作りにすると、ダウンロード中に流れてきた
+;       場合に取りこぼして無駄に待つことになるため、待たない)
+; ---------------------------------------------------------------------
+if CFG_TOKEN_PROMPT = 1 then
+    ; 改行は \n で組み立て、strspecial で実際の改行へ変換する
+    MSG = 'ダウンロードした URL をブラウザで開いて認証し、'
+    strconcat MSG '表示されたトークンを貼り付けてください。\n\n'
+    strconcat MSG '保存先: '
+    strconcat MSG LOCAL_FILE
+    strcompare LOCAL_SHORTCUT ''
+    if result <> 0 then
+        strconcat MSG '\nショートカット: '
+        strconcat MSG LOCAL_SHORTCUT
+        strconcat MSG ' (ダブルクリックでブラウザが開きます)'
+    endif
+    strspecial MSG
+
+    inputbox MSG 'AWS ログイン - トークン入力'
+    if result = 1 then
+        sendln inputstr
+    else
+        messagebox 'トークン入力がキャンセルされました。端末に直接貼り付けて続行することもできます。' 'AWS ログイン - 中断'
+        end
+    endif
+endif
+
+; ---------------------------------------------------------------------
+; 8. 認証結果の確認
+; ---------------------------------------------------------------------
+if CFG_SHOW_RESULT = 1 then
+    timeout = CFG_WAIT_LOGIN
+    waitregex '\[AWS_LOGIN_FILE\] DONE=ok' '\[AWS_LOGIN_FILE\] DONE=ng'
+    if result = 1 then
+        messagebox 'AWS へのログインに成功しました。' 'AWS ログイン - 完了'
+    elseif result = 2 then
+        messagebox 'AWS へのログインに失敗しました。画面の出力内容を確認してください。' 'AWS ログイン - エラー'
+    else
+        messagebox '認証結果を確認できませんでした (タイムアウト)。画面の出力内容を確認してください。' 'AWS ログイン - 警告'
+    endif
+endif
+
+end
+
+; =====================================================================
+;  サブルーチン (call でのみ実行される。end より後ろに置く)
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; wait_local_file:
+;   WAIT_TARGET のファイルが現れるまで WAIT_SECONDS 秒待つ。
+;   見つかれば FOUND=1、タイムアウトすれば FOUND=0 を返す。
+;   scprecv は転送完了を待たずに戻るため、このループで完了を待ち合わせる。
+; ---------------------------------------------------------------------
+:wait_local_file
+    FOUND = 0
+    ; 200 ミリ秒間隔で WAIT_SECONDS 秒ぶん確認する
+    WAIT_COUNT = WAIT_SECONDS * 5
+    WAIT_I = 0
+    while WAIT_I < WAIT_COUNT
+        filesearch WAIT_TARGET
+        if result = 1 then
+            FOUND = 1
+            break
+        endif
+        mpause 200
+        WAIT_I = WAIT_I + 1
+    endwhile
+
+    ; 書き込み途中のファイルを掴まないよう、少しだけ待ってから戻る
+    if FOUND = 1 then
+        mpause 300
+    endif
+    return
